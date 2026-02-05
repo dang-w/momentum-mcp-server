@@ -12,6 +12,7 @@ import (
 	"github.com/dang-w/momentum-mcp-server/internal/auth"
 	"github.com/dang-w/momentum-mcp-server/internal/config"
 	"github.com/dang-w/momentum-mcp-server/server"
+	"github.com/dang-w/momentum-mcp-server/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -22,8 +23,14 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Create MCP server
-	mcpServer := server.New()
+	// Create GitHub storage
+	store, err := storage.NewGitHubStorage(cfg.GitHubToken, cfg.GitHubRepo)
+	if err != nil {
+		log.Fatalf("Failed to create storage: %v", err)
+	}
+
+	// Create MCP server with storage
+	mcpServer := server.New(store)
 
 	// Create the streamable HTTP handler for MCP
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {

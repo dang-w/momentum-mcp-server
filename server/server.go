@@ -4,6 +4,9 @@ package server
 import (
 	"context"
 
+	"github.com/dang-w/momentum-mcp-server/resources"
+	"github.com/dang-w/momentum-mcp-server/storage"
+	"github.com/dang-w/momentum-mcp-server/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -13,14 +16,27 @@ const (
 )
 
 // New creates and configures a new MCP server with all resources and tools registered.
-func New() *mcp.Server {
+// The storage parameter is used for reading and writing productivity data files.
+func New(store storage.Storage) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,
 		Version: ServerVersion,
 	}, nil)
 
-	// Register placeholder ping tool for initial verification
+	// Register placeholder ping tool for verification
 	registerPingTool(server)
+
+	// Register resources
+	resources.NewTodosResource(store).Register(server)
+	resources.NewStrategyResource(store).Register(server)
+	resources.NewReadingResource(store).Register(server)
+	resources.NewRemindersResource(store).Register(server)
+
+	// Register tools
+	tools.NewTodoTools(store).Register(server)
+	tools.NewStrategyTools(store).Register(server)
+	tools.NewReadingTools(store).Register(server)
+	tools.NewReminderTools(store).Register(server)
 
 	return server
 }
