@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Config holds all configuration values for the server.
@@ -48,4 +49,13 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// GitHubUsername extracts the owner/username from the GitHubRepo.
+func (c *Config) GitHubUsername() string {
+	parts := strings.SplitN(c.GitHubRepo, "/", 2)
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return ""
 }

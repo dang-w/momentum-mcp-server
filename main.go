@@ -29,8 +29,12 @@ func main() {
 		log.Fatalf("Failed to create storage: %v", err)
 	}
 
-	// Create MCP server with storage
-	mcpServer := server.New(store)
+	// Create MCP server with storage and GitHub activity config
+	mcpServer := server.New(server.Config{
+		Storage:        store,
+		GitHubToken:    cfg.GitHubToken,
+		GitHubUsername: cfg.GitHubUsername(),
+	})
 
 	// Create the streamable HTTP handler for MCP
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {

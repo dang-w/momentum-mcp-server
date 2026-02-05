@@ -15,9 +15,21 @@ const (
 	ServerVersion = "0.1.0"
 )
 
+// Config holds the configuration needed to create the MCP server.
+type Config struct {
+	// Storage is used for reading and writing productivity data files.
+	Storage storage.Storage
+
+	// GitHubToken is the personal access token for GitHub API access.
+	// Used for fetching contribution activity data.
+	GitHubToken string
+
+	// GitHubUsername is the GitHub username to fetch activity for.
+	GitHubUsername string
+}
+
 // New creates and configures a new MCP server with all resources and tools registered.
-// The storage parameter is used for reading and writing productivity data files.
-func New(store storage.Storage) *mcp.Server {
+func New(cfg Config) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,
 		Version: ServerVersion,
@@ -26,17 +38,31 @@ func New(store storage.Storage) *mcp.Server {
 	// Register placeholder ping tool for verification
 	registerPingTool(server)
 
+	// Create GitHub activity resource (used by both github-activity and weekly-summary)
+	var githubActivity *resources.GitHubActivityResource
+	if cfg.GitHubToken != "" && cfg.GitHubUsername != "" {
+		githubActivity = resources.NewGitHubActivityResource(cfg.GitHubToken, cfg.GitHubUsername)
+	}
+
 	// Register resources
-	resources.NewTodosResource(store).Register(server)
-	resources.NewStrategyResource(store).Register(server)
-	resources.NewReadingResource(store).Register(server)
-	resources.NewRemindersResource(store).Register(server)
+	resources.NewTodosResource(cfg.Storage).Register(server)
+	resources.NewStrategyResource(cfg.Storage).Register(server)
+	resources.NewReadingResource(cfg.Storage).Register(server)
+	resources.NewRemindersResource(cfg.Storage).Register(server)
+
+	// Register GitHub activity resource if configured
+	if githubActivity != nil {
+		githubActivity.Register(server)
+	}
+
+	// Register weekly summary resource (aggregates all data)
+	resources.NewSummaryResource(cfg.Storage, githubActivity).Register(server)
 
 	// Register tools
-	tools.NewTodoTools(store).Register(server)
-	tools.NewStrategyTools(store).Register(server)
-	tools.NewReadingTools(store).Register(server)
-	tools.NewReminderTools(store).Register(server)
+	tools.NewTodoTools(cfg.Storage).Register(server)
+	tools.NewStrategyTools(cfg.Storage).Register(server)
+	tools.NewReadingTools(cfg.Storage).Register(server)
+	tools.NewReminderTools(cfg.Storage).Register(server)
 
 	return server
 }
