@@ -44,6 +44,10 @@ type Config struct {
 	// BaseURL is the public URL of this server (used for OAuth issuer).
 	// If not set, it will be derived from request headers.
 	BaseURL string
+
+	// DataDir is the directory for persistent data (OAuth tokens, etc.).
+	// If empty, data is stored in memory only (lost on restart).
+	DataDir string
 }
 
 // Load reads configuration from environment variables and validates
@@ -56,6 +60,7 @@ func Load() (*Config, error) {
 		Port:              os.Getenv("PORT"),
 		OAuthAuthorizePin: os.Getenv("OAUTH_AUTHORIZE_PIN"),
 		BaseURL:           os.Getenv("BASE_URL"),
+		DataDir:           os.Getenv("DATA_DIR"),
 	}
 
 	// Default port if not specified

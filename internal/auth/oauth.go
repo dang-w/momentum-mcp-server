@@ -26,6 +26,7 @@ type OAuthServer struct {
 // OAuthConfig configures the OAuth server.
 type OAuthConfig struct {
 	TokenStore   *TokenStore
+	ClientStore  *ClientStore // Optional - if nil, a new one is created
 	BaseURL      string
 	AuthorizePin string
 }
@@ -38,9 +39,13 @@ func logAuthEvent(event, clientID, detail string) {
 
 // NewOAuthServer creates a new OAuth server.
 func NewOAuthServer(config OAuthConfig) *OAuthServer {
+	clientStore := config.ClientStore
+	if clientStore == nil {
+		clientStore = NewClientStore()
+	}
 	return &OAuthServer{
 		tokenStore:   config.TokenStore,
-		clientStore:  NewClientStore(),
+		clientStore:  clientStore,
 		authCodes:    NewAuthCodeStore(),
 		baseURL:      strings.TrimSuffix(config.BaseURL, "/"),
 		authorizePin: config.AuthorizePin,

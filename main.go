@@ -30,8 +30,15 @@ func main() {
 		log.Fatalf("Failed to create storage: %v", err)
 	}
 
-	// Create OAuth token store
+	// Create OAuth token and client stores
 	tokenStore := auth.NewTokenStore(cfg.OAuthAccessTokenTTL, cfg.OAuthRefreshTokenTTL)
+	clientStore := auth.NewClientStore()
+
+	// Set up persistence for OAuth state (survives restarts)
+	persistence := auth.NewPersistence(cfg.DataDir, tokenStore, clientStore)
+	if err := persistence.Start(); err != nil {
+		log.Printf("Warning: persistence failed to start: %v", err)
+	}
 
 	// Create MCP server with storage and GitHub activity config
 	mcpServer := server.New(server.Config{
@@ -54,6 +61,7 @@ func main() {
 	// Create OAuth server
 	oauthServer := auth.NewOAuthServer(auth.OAuthConfig{
 		TokenStore:   tokenStore,
+		ClientStore:  clientStore,
 		BaseURL:      baseURL,
 		AuthorizePin: cfg.OAuthAuthorizePin,
 	})
@@ -119,6 +127,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+
+	// Save OAuth state before shutdown
+	persistence.Stop()
 
 	// Give outstanding requests 5 seconds to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
