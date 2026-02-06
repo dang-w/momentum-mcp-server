@@ -91,7 +91,9 @@ func main() {
 
 	// MCP endpoint (auth required)
 	// The MCP SDK handler handles both GET and POST for the streamable HTTP transport
+	// Serve at both /mcp (explicit) and / (for Claude.ai custom connectors that use base URL)
 	mux.Handle("/mcp", authMiddleware(mcpHandler))
+	mux.Handle("/", authMiddleware(mcpHandler))
 
 	// Create HTTP server
 	httpServer := &http.Server{
