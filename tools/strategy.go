@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -43,6 +44,39 @@ type AddNoteOutput struct {
 	Message string `json:"message"`
 }
 
+// ListNotesInput is the input schema for the list_notes tool.
+type ListNotesInput struct {
+	Search string `json:"search,omitempty" jsonschema:"Text to filter notes by. Case-insensitive partial match."`
+}
+
+// ListNotesOutput is the output for the list_notes tool.
+type ListNotesOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// ListNotesResult is the response payload for list_notes.
+type ListNotesResult struct {
+	Notes []string `json:"notes"`
+	Total int      `json:"total"`
+}
+
+// GetMilestonesInput is the input schema for the get_milestones tool.
+type GetMilestonesInput struct{}
+
+// GetMilestonesOutput is the output for the get_milestones tool.
+type GetMilestonesOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// GetMilestonesResult is the response payload for get_milestones.
+type GetMilestonesResult struct {
+	CurrentPhase        string          `json:"current_phase"`
+	ActiveMilestones    []MilestoneItem `json:"active_milestones"`
+	CompletedMilestones []MilestoneItem `json:"completed_milestones"`
+}
+
 // Register registers strategy tools with the MCP server.
 func (t *StrategyTools) Register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -54,6 +88,16 @@ func (t *StrategyTools) Register(server *mcp.Server) {
 		Name:        "add_note",
 		Description: "Add a note to the strategy notes section",
 	}, t.addNote)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_notes",
+		Description: "List strategy notes with optional text search. Notes are plain text entries without dates or IDs.",
+	}, t.listNotes)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_milestones",
+		Description: "Get all strategy milestones with their completion status",
+	}, t.getMilestones)
 }
 
 func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRequest, input UpdateMilestoneInput) (*mcp.CallToolResult, UpdateMilestoneOutput, error) {
@@ -224,5 +268,82 @@ func (t *StrategyTools) addNote(ctx context.Context, req *mcp.CallToolRequest, i
 	return nil, AddNoteOutput{
 		Success: true,
 		Message: fmt.Sprintf("Added note: %s", truncate(input.Note, 50)),
+	}, nil
+}
+
+func (t *StrategyTools) listNotes(ctx context.Context, req *mcp.CallToolRequest, input ListNotesInput) (*mcp.CallToolResult, ListNotesOutput, error) {
+	content, _, err := t.storage.ReadFile(ctx, "strategy.md")
+	if err != nil {
+		return nil, ListNotesOutput{}, fmt.Errorf("reading strategy.md: %w", err)
+	}
+
+	s, err := storage.ParseStrategy(content)
+	if err != nil {
+		return nil, ListNotesOutput{}, fmt.Errorf("parsing strategy: %w", err)
+	}
+
+	notes := s.Notes
+	search := strings.ToLower(strings.TrimSpace(input.Search))
+	if search != "" {
+		var filtered []string
+		for _, note := range notes {
+			if strings.Contains(strings.ToLower(note), search) {
+				filtered = append(filtered, note)
+			}
+		}
+		notes = filtered
+	}
+
+	result := ListNotesResult{
+		Notes: notes,
+		Total: len(s.Notes),
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, ListNotesOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
+	return nil, ListNotesOutput{
+		Success: true,
+		Message: string(jsonBytes),
+	}, nil
+}
+
+func (t *StrategyTools) getMilestones(ctx context.Context, req *mcp.CallToolRequest, input GetMilestonesInput) (*mcp.CallToolResult, GetMilestonesOutput, error) {
+	content, _, err := t.storage.ReadFile(ctx, "strategy.md")
+	if err != nil {
+		return nil, GetMilestonesOutput{}, fmt.Errorf("reading strategy.md: %w", err)
+	}
+
+	s, err := storage.ParseStrategy(content)
+	if err != nil {
+		return nil, GetMilestonesOutput{}, fmt.Errorf("parsing strategy: %w", err)
+	}
+
+	active := make([]MilestoneItem, len(s.ActiveMilestones))
+	for i, m := range s.ActiveMilestones {
+		active[i] = milestoneToItem(m)
+	}
+
+	completed := make([]MilestoneItem, len(s.CompletedMilestones))
+	for i, m := range s.CompletedMilestones {
+		completed[i] = milestoneToItem(m)
+	}
+
+	result := GetMilestonesResult{
+		CurrentPhase:        s.CurrentPhase,
+		ActiveMilestones:    active,
+		CompletedMilestones: completed,
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, GetMilestonesOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
+	return nil, GetMilestonesOutput{
+		Success: true,
+		Message: string(jsonBytes),
 	}, nil
 }

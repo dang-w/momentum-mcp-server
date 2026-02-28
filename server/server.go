@@ -63,6 +63,7 @@ func New(cfg Config) *mcp.Server {
 	tools.NewStrategyTools(cfg.Storage).Register(server)
 	tools.NewReadingTools(cfg.Storage).Register(server)
 	tools.NewReminderTools(cfg.Storage).Register(server)
+	tools.NewDashboardTools(cfg.Storage).Register(server)
 
 	return server
 }

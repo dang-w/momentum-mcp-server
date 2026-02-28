@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -43,6 +44,27 @@ type CompleteReminderOutput struct {
 	Message string `json:"message"`
 }
 
+// ListRemindersInput is the input schema for the list_reminders tool.
+type ListRemindersInput struct {
+	Status   string `json:"status,omitempty" jsonschema:"Filter by status: pending, completed, or all. Defaults to pending."`
+	DateFrom string `json:"date_from,omitempty" jsonschema:"Filter reminders from this date (YYYY-MM-DD). Only applies to pending reminders."`
+	DateTo   string `json:"date_to,omitempty" jsonschema:"Filter reminders up to this date (YYYY-MM-DD). Only applies to pending reminders."`
+}
+
+// ListRemindersOutput is the output for the list_reminders tool.
+type ListRemindersOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// ListRemindersResult is the response payload for list_reminders.
+type ListRemindersResult struct {
+	Reminders      []ReminderItem `json:"reminders"`
+	TotalPending   int            `json:"total_pending"`
+	TotalCompleted int            `json:"total_completed"`
+	TotalOverdue   int            `json:"total_overdue"`
+}
+
 // Register registers reminder tools with the MCP server.
 func (t *ReminderTools) Register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -54,6 +76,11 @@ func (t *ReminderTools) Register(server *mcp.Server) {
 		Name:        "complete_reminder",
 		Description: "Mark a reminder as completed",
 	}, t.completeReminder)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_reminders",
+		Description: "List reminders with optional filtering by status and date range",
+	}, t.listReminders)
 }
 
 func (t *ReminderTools) setReminder(ctx context.Context, req *mcp.CallToolRequest, input SetReminderInput) (*mcp.CallToolResult, SetReminderOutput, error) {
@@ -189,5 +216,111 @@ func (t *ReminderTools) completeReminder(ctx context.Context, req *mcp.CallToolR
 	return nil, CompleteReminderOutput{
 		Success: true,
 		Message: fmt.Sprintf("Completed reminder: %s", reminder.Text),
+	}, nil
+}
+
+func (t *ReminderTools) listReminders(ctx context.Context, req *mcp.CallToolRequest, input ListRemindersInput) (*mcp.CallToolResult, ListRemindersOutput, error) {
+	content, _, err := t.storage.ReadFile(ctx, "reminders.md")
+	if err != nil {
+		return nil, ListRemindersOutput{}, fmt.Errorf("reading reminders.md: %w", err)
+	}
+
+	rf, err := storage.ParseReminders(content)
+	if err != nil {
+		return nil, ListRemindersOutput{}, fmt.Errorf("parsing reminders: %w", err)
+	}
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+
+	// Parse optional date filters
+	var dateFrom, dateTo time.Time
+	if input.DateFrom != "" {
+		dateFrom, err = time.Parse("2006-01-02", strings.TrimSpace(input.DateFrom))
+		if err != nil {
+			return nil, ListRemindersOutput{
+				Success: false,
+				Message: fmt.Sprintf("Invalid date_from format %q. Use YYYY-MM-DD.", input.DateFrom),
+			}, nil
+		}
+	}
+	if input.DateTo != "" {
+		dateTo, err = time.Parse("2006-01-02", strings.TrimSpace(input.DateTo))
+		if err != nil {
+			return nil, ListRemindersOutput{
+				Success: false,
+				Message: fmt.Sprintf("Invalid date_to format %q. Use YYYY-MM-DD.", input.DateTo),
+			}, nil
+		}
+	}
+
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if status == "" {
+		status = "pending"
+	}
+
+	var items []storage.Reminder
+	switch status {
+	case "pending":
+		items = rf.Upcoming
+	case "completed":
+		items = rf.Completed
+	case "all":
+		items = append(items, rf.Upcoming...)
+		items = append(items, rf.Completed...)
+	default:
+		return nil, ListRemindersOutput{
+			Success: false,
+			Message: fmt.Sprintf("Invalid status %q. Use: pending, completed, or all", input.Status),
+		}, nil
+	}
+
+	// Apply date filters (only for non-completed items)
+	if !dateFrom.IsZero() || !dateTo.IsZero() {
+		var filtered []storage.Reminder
+		for _, r := range items {
+			if !dateFrom.IsZero() && r.Date.Before(dateFrom) {
+				continue
+			}
+			if !dateTo.IsZero() && r.Date.After(dateTo) {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		items = filtered
+	}
+
+	// Convert and count overdue
+	reminderItems := make([]ReminderItem, len(items))
+	totalOverdue := 0
+	for i, r := range items {
+		reminderItems[i] = reminderToItem(r, today)
+		if reminderItems[i].Overdue {
+			totalOverdue++
+		}
+	}
+
+	// Count overdue across all pending (not just filtered)
+	allOverdue := 0
+	for _, r := range rf.Upcoming {
+		if r.Date.Before(today) {
+			allOverdue++
+		}
+	}
+
+	result := ListRemindersResult{
+		Reminders:      reminderItems,
+		TotalPending:   len(rf.Upcoming),
+		TotalCompleted: len(rf.Completed),
+		TotalOverdue:   allOverdue,
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, ListRemindersOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
+	return nil, ListRemindersOutput{
+		Success: true,
+		Message: string(jsonBytes),
 	}, nil
 }
