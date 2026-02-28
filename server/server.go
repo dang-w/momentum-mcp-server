@@ -12,7 +12,7 @@ import (
 
 const (
 	ServerName    = "momentum"
-	ServerVersion = "0.1.0"
+	ServerVersion = "0.2.0"
 )
 
 // Config holds the configuration needed to create the MCP server.
@@ -63,6 +63,7 @@ func New(cfg Config) *mcp.Server {
 	tools.NewStrategyTools(cfg.Storage).Register(server)
 	tools.NewReadingTools(cfg.Storage).Register(server)
 	tools.NewReminderTools(cfg.Storage).Register(server)
+	tools.NewDashboardTools(cfg.Storage).Register(server)
 
 	return server
 }

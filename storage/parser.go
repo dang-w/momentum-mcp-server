@@ -1,10 +1,22 @@
 package storage
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// GenerateID creates a short random hex ID for items.
+func GenerateID() string {
+	b := make([]byte, 4) // 4 bytes = 8 hex chars
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return hex.EncodeToString([]byte(time.Now().Format("15040500")))[:8]
+	}
+	return hex.EncodeToString(b)
+}
 
 // Priority levels for todos.
 type Priority string
@@ -17,10 +29,11 @@ const (
 
 // Todo represents a single todo item.
 type Todo struct {
-	Text      string
-	Priority  Priority
-	Completed bool
-	Added     time.Time
+	ID          string
+	Text        string
+	Priority    Priority
+	Completed   bool
+	Added       time.Time
 	CompletedAt *time.Time
 }
 
@@ -34,6 +47,7 @@ type TodoFile struct {
 
 // Milestone represents a strategy milestone.
 type Milestone struct {
+	ID          string
 	Text        string
 	Due         *time.Time
 	Completed   bool
@@ -52,6 +66,7 @@ type Strategy struct {
 
 // ReadingItem represents a reading list entry.
 type ReadingItem struct {
+	ID      string
 	URL     string
 	Notes   string
 	Read    bool
@@ -68,6 +83,7 @@ type ReadingList struct {
 
 // Reminder represents a reminder entry.
 type Reminder struct {
+	ID          string
 	Date        time.Time
 	Text        string
 	Completed   bool
@@ -163,15 +179,20 @@ func parseTodoLine(checkbox, rest string, priority Priority) Todo {
 	text := rest
 	if matches := metadataPattern.FindStringSubmatch(rest); matches != nil {
 		text = strings.TrimSpace(metadataPattern.ReplaceAllString(rest, ""))
-		parseMetadata(matches[1], &todo.Added, &todo.CompletedAt)
+		parseMetadata(matches[1], &todo.ID, &todo.Added, &todo.CompletedAt)
+	}
+
+	// Generate ID if not present in metadata
+	if todo.ID == "" {
+		todo.ID = GenerateID()
 	}
 
 	todo.Text = text
 	return todo
 }
 
-// parseMetadata extracts dates from metadata string like "added:2026-01-15,completed:2026-02-01".
-func parseMetadata(meta string, added *time.Time, completed **time.Time) {
+// parseMetadata extracts dates and ID from metadata string like "id:abc123,added:2026-01-15,completed:2026-02-01".
+func parseMetadata(meta string, id *string, added *time.Time, completed **time.Time) {
 	parts := strings.Split(meta, ",")
 	for _, part := range parts {
 		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
@@ -179,11 +200,17 @@ func parseMetadata(meta string, added *time.Time, completed **time.Time) {
 			continue
 		}
 		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
-		if t, err := time.Parse(dateFormat, val); err == nil {
-			switch key {
-			case "added":
+		switch key {
+		case "id":
+			if id != nil {
+				*id = val
+			}
+		case "added":
+			if t, err := time.Parse(dateFormat, val); err == nil {
 				*added = t
-			case "completed":
+			}
+		case "completed":
+			if t, err := time.Parse(dateFormat, val); err == nil {
 				tc := t
 				*completed = &tc
 			}
@@ -240,19 +267,30 @@ func formatTodoLine(todo Todo, includeCompleted bool) string {
 		checkbox = "[x]"
 	}
 
-	meta := ""
-	if !todo.Added.IsZero() {
-		meta = "{added:" + todo.Added.Format(dateFormat)
-		if includeCompleted && todo.CompletedAt != nil {
-			meta += ",completed:" + todo.CompletedAt.Format(dateFormat)
-		}
-		meta += "}"
-	}
+	meta := formatMetadata(todo.ID, todo.Added, todo.CompletedAt, includeCompleted)
 
 	if meta != "" {
 		return "- " + checkbox + " " + todo.Text + " " + meta + "\n"
 	}
 	return "- " + checkbox + " " + todo.Text + "\n"
+}
+
+// formatMetadata builds a metadata string like {id:abc123,added:2026-01-15,completed:2026-02-01}.
+func formatMetadata(id string, added time.Time, completedAt *time.Time, includeCompleted bool) string {
+	var parts []string
+	if id != "" {
+		parts = append(parts, "id:"+id)
+	}
+	if !added.IsZero() {
+		parts = append(parts, "added:"+added.Format(dateFormat))
+	}
+	if includeCompleted && completedAt != nil {
+		parts = append(parts, "completed:"+completedAt.Format(dateFormat))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 // ParseStrategy parses a strategy.md file content.
@@ -328,7 +366,12 @@ func parseMilestoneLine(checkbox, rest string, lines []string, lineIndex int) Mi
 	// Extract metadata
 	if matches := metadataPattern.FindStringSubmatch(text); matches != nil {
 		text = strings.TrimSpace(metadataPattern.ReplaceAllString(text, ""))
-		parseMetadata(matches[1], &m.Added, &m.CompletedAt)
+		parseMetadata(matches[1], &m.ID, &m.Added, &m.CompletedAt)
+	}
+
+	// Generate ID if not present in metadata
+	if m.ID == "" {
+		m.ID = GenerateID()
 	}
 
 	m.Text = strings.TrimSpace(text)
@@ -375,12 +418,9 @@ func formatMilestoneLine(m Milestone, includeCompleted bool) string {
 		line += " — Due: " + m.Due.Format(dateFormat)
 	}
 
-	if !m.Added.IsZero() {
-		line += " {added:" + m.Added.Format(dateFormat)
-		if includeCompleted && m.CompletedAt != nil {
-			line += ",completed:" + m.CompletedAt.Format(dateFormat)
-		}
-		line += "}"
+	meta := formatMetadata(m.ID, m.Added, m.CompletedAt, includeCompleted)
+	if meta != "" {
+		line += " " + meta
 	}
 
 	return line + "\n"
@@ -425,6 +465,12 @@ func parseReadingLine(checkbox, rest string) ReadingItem {
 		Read: checkbox == "x" || checkbox == "X",
 	}
 
+	// Extract metadata block first (if present)
+	if matches := metadataPattern.FindStringSubmatch(rest); matches != nil {
+		rest = strings.TrimSpace(metadataPattern.ReplaceAllString(rest, ""))
+		parseMetadata(matches[1], &item.ID, &item.Added, nil)
+	}
+
 	// Split by — delimiter
 	parts := strings.Split(rest, "—")
 	if len(parts) > 0 {
@@ -454,6 +500,11 @@ func parseReadingLine(checkbox, rest string) ReadingItem {
 				item.ReadAt = &t
 			}
 		}
+	}
+
+	// Generate ID if not present
+	if item.ID == "" {
+		item.ID = GenerateID()
 	}
 
 	return item
@@ -494,6 +545,12 @@ func formatReadingLine(item ReadingItem, isRead bool) string {
 
 	if item.Notes != "" {
 		line += " — Notes: " + item.Notes
+	}
+
+	// Append metadata block with ID
+	meta := formatMetadata(item.ID, time.Time{}, nil, false)
+	if meta != "" {
+		line += " " + meta
 	}
 
 	return line + "\n"
@@ -544,7 +601,12 @@ func parseReminderLine(dateStr, rest string) Reminder {
 	text := rest
 	if matches := metadataPattern.FindStringSubmatch(rest); matches != nil {
 		text = strings.TrimSpace(metadataPattern.ReplaceAllString(rest, ""))
-		parseMetadata(matches[1], &r.Added, &r.CompletedAt)
+		parseMetadata(matches[1], &r.ID, &r.Added, &r.CompletedAt)
+	}
+
+	// Generate ID if not present in metadata
+	if r.ID == "" {
+		r.ID = GenerateID()
 	}
 
 	r.Text = text
@@ -573,12 +635,9 @@ func SerializeReminders(rf *ReminderFile) string {
 func formatReminderLine(r Reminder, includeCompleted bool) string {
 	line := "- " + r.Date.Format(dateFormat) + ": " + r.Text
 
-	if !r.Added.IsZero() {
-		line += " {added:" + r.Added.Format(dateFormat)
-		if includeCompleted && r.CompletedAt != nil {
-			line += ",completed:" + r.CompletedAt.Format(dateFormat)
-		}
-		line += "}"
+	meta := formatMetadata(r.ID, r.Added, r.CompletedAt, includeCompleted)
+	if meta != "" {
+		line += " " + meta
 	}
 
 	return line + "\n"

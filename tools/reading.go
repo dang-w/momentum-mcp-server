@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -34,12 +35,55 @@ type AddToReadingListOutput struct {
 
 // MarkReadInput is the input schema for the mark_read tool.
 type MarkReadInput struct {
-	URL   string `json:"url" jsonschema:"URL or partial URL to match against reading list items"`
+	URL   string `json:"url,omitempty" jsonschema:"URL or partial URL to match against reading list items"`
+	ID    string `json:"id,omitempty" jsonschema:"ID of the reading list item to mark as read. More reliable than URL matching. Use list_reading_list to find IDs."`
 	Notes string `json:"notes,omitempty" jsonschema:"Optional notes about the article (will replace existing notes)"`
 }
 
 // MarkReadOutput is the output for the mark_read tool.
 type MarkReadOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// ListReadingListInput is the input schema for the list_reading_list tool.
+type ListReadingListInput struct {
+	Status string `json:"status,omitempty" jsonschema:"Filter by status: unread, read, or all. Defaults to all."`
+}
+
+// ListReadingListOutput is the output for the list_reading_list tool.
+type ListReadingListOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// ListReadingListResult is the response payload for list_reading_list.
+type ListReadingListResult struct {
+	Items       []ReadingListItem `json:"items"`
+	TotalUnread int               `json:"total_unread"`
+	TotalRead   int               `json:"total_read"`
+}
+
+// DeleteReadingItemInput is the input schema for the delete_reading_item tool.
+type DeleteReadingItemInput struct {
+	ID      string `json:"id" jsonschema:"ID of the reading list item to delete. Use list_reading_list to find IDs."`
+	Confirm bool   `json:"confirm" jsonschema:"Must be set to true to confirm deletion."`
+}
+
+// DeleteReadingItemOutput is the output for the delete_reading_item tool.
+type DeleteReadingItemOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// EditReadingItemInput is the input schema for the edit_reading_item tool.
+type EditReadingItemInput struct {
+	ID    string `json:"id" jsonschema:"ID of the reading list item to edit. Use list_reading_list to find IDs."`
+	Notes string `json:"notes,omitempty" jsonschema:"New notes. Pass empty string to clear notes."`
+}
+
+// EditReadingItemOutput is the output for the edit_reading_item tool.
+type EditReadingItemOutput struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
@@ -55,6 +99,21 @@ func (t *ReadingTools) Register(server *mcp.Server) {
 		Name:        "mark_read",
 		Description: "Mark a reading list item as read",
 	}, t.markRead)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_reading_list",
+		Description: "List reading list items with optional filtering by read status",
+	}, t.listReadingList)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_reading_item",
+		Description: "Edit notes on a reading list item",
+	}, t.editReadingItem)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_reading_item",
+		Description: "Permanently delete a reading list item",
+	}, t.deleteReadingItem)
 }
 
 func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRequest, input AddToReadingListInput) (*mcp.CallToolResult, AddToReadingListOutput, error) {
@@ -97,6 +156,7 @@ func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRe
 
 	// Add the new item
 	newItem := storage.ReadingItem{
+		ID:    storage.GenerateID(),
 		URL:   url,
 		Notes: strings.TrimSpace(input.Notes),
 		Added: time.Now().UTC().Truncate(24 * time.Hour),
@@ -115,17 +175,22 @@ func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRe
 		return nil, AddToReadingListOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(readingToItem(newItem))
+	if err != nil {
+		return nil, AddToReadingListOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, AddToReadingListOutput{
 		Success: true,
-		Message: fmt.Sprintf("Added to reading list: %s", url),
+		Message: string(itemJSON),
 	}, nil
 }
 
 func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, input MarkReadInput) (*mcp.CallToolResult, MarkReadOutput, error) {
-	if strings.TrimSpace(input.URL) == "" {
+	if strings.TrimSpace(input.URL) == "" && strings.TrimSpace(input.ID) == "" {
 		return nil, MarkReadOutput{
 			Success: false,
-			Message: "URL cannot be empty",
+			Message: "Either url or id must be provided",
 		}, nil
 	}
 
@@ -140,31 +205,46 @@ func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, MarkReadOutput{}, fmt.Errorf("parsing reading list: %w", err)
 	}
 
-	// Find matching items
-	searchText := strings.ToLower(strings.TrimSpace(input.URL))
+	// Find matching items — prefer ID match if provided
 	var matches []int
-	for i, item := range rl.ToRead {
-		if strings.Contains(strings.ToLower(item.URL), searchText) {
-			matches = append(matches, i)
+	if id := strings.TrimSpace(input.ID); id != "" {
+		for i, item := range rl.ToRead {
+			if item.ID == id {
+				matches = append(matches, i)
+				break
+			}
 		}
-	}
-
-	if len(matches) == 0 {
-		return nil, MarkReadOutput{
-			Success: false,
-			Message: fmt.Sprintf("No unread item found matching %q", input.URL),
-		}, nil
-	}
-
-	if len(matches) > 1 {
-		var matchURLs []string
-		for _, idx := range matches {
-			matchURLs = append(matchURLs, fmt.Sprintf("- %s", rl.ToRead[idx].URL))
+		if len(matches) == 0 {
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("No unread item found with id %q", input.ID),
+			}, nil
 		}
-		return nil, MarkReadOutput{
-			Success: false,
-			Message: fmt.Sprintf("Multiple items match %q. Please be more specific:\n%s", input.URL, strings.Join(matchURLs, "\n")),
-		}, nil
+	} else {
+		searchText := strings.ToLower(strings.TrimSpace(input.URL))
+		for i, item := range rl.ToRead {
+			if strings.Contains(strings.ToLower(item.URL), searchText) {
+				matches = append(matches, i)
+			}
+		}
+
+		if len(matches) == 0 {
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("No unread item found matching %q", input.URL),
+			}, nil
+		}
+
+		if len(matches) > 1 {
+			var matchURLs []string
+			for _, idx := range matches {
+				matchURLs = append(matchURLs, fmt.Sprintf("- [%s] %s", rl.ToRead[idx].ID, rl.ToRead[idx].URL))
+			}
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("Multiple items match %q. Please be more specific or use an id:\n%s", input.URL, strings.Join(matchURLs, "\n")),
+			}, nil
+		}
 	}
 
 	// Mark as read
@@ -193,8 +273,241 @@ func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, MarkReadOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(readingToItem(item))
+	if err != nil {
+		return nil, MarkReadOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, MarkReadOutput{
 		Success: true,
-		Message: fmt.Sprintf("Marked as read: %s", item.URL),
+		Message: string(itemJSON),
+	}, nil
+}
+
+func (t *ReadingTools) listReadingList(ctx context.Context, req *mcp.CallToolRequest, input ListReadingListInput) (*mcp.CallToolResult, ListReadingListOutput, error) {
+	content, _, err := t.storage.ReadFile(ctx, "reading-list.md")
+	if err != nil {
+		return nil, ListReadingListOutput{}, fmt.Errorf("reading reading-list.md: %w", err)
+	}
+
+	rl, err := storage.ParseReadingList(content)
+	if err != nil {
+		return nil, ListReadingListOutput{}, fmt.Errorf("parsing reading list: %w", err)
+	}
+
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if status == "" {
+		status = "all"
+	}
+
+	var items []storage.ReadingItem
+	switch status {
+	case "unread":
+		items = rl.ToRead
+	case "read":
+		items = rl.Read
+	case "all":
+		items = append(items, rl.ToRead...)
+		items = append(items, rl.Read...)
+	default:
+		return nil, ListReadingListOutput{
+			Success: false,
+			Message: fmt.Sprintf("Invalid status %q. Use: unread, read, or all", input.Status),
+		}, nil
+	}
+
+	readingItems := make([]ReadingListItem, len(items))
+	for i, item := range items {
+		readingItems[i] = readingToItem(item)
+	}
+
+	result := ListReadingListResult{
+		Items:       readingItems,
+		TotalUnread: len(rl.ToRead),
+		TotalRead:   len(rl.Read),
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, ListReadingListOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
+	return nil, ListReadingListOutput{
+		Success: true,
+		Message: string(jsonBytes),
+	}, nil
+}
+
+func (t *ReadingTools) editReadingItem(ctx context.Context, req *mcp.CallToolRequest, input EditReadingItemInput) (*mcp.CallToolResult, EditReadingItemOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, EditReadingItemOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	// Read current reading list
+	content, sha, err := t.storage.ReadFile(ctx, "reading-list.md")
+	if err != nil {
+		return nil, EditReadingItemOutput{}, fmt.Errorf("reading reading-list.md: %w", err)
+	}
+
+	rl, err := storage.ParseReadingList(content)
+	if err != nil {
+		return nil, EditReadingItemOutput{}, fmt.Errorf("parsing reading list: %w", err)
+	}
+
+	// Search both lists by ID
+	id := strings.TrimSpace(input.ID)
+
+	for i, item := range rl.ToRead {
+		if item.ID == id {
+			rl.ToRead[i].Notes = strings.TrimSpace(input.Notes)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Edit reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(rl.ToRead[i]))
+			if err != nil {
+				return nil, EditReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	for i, item := range rl.Read {
+		if item.ID == id {
+			rl.Read[i].Notes = strings.TrimSpace(input.Notes)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Edit reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(rl.Read[i]))
+			if err != nil {
+				return nil, EditReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, EditReadingItemOutput{
+		Success: false,
+		Message: fmt.Sprintf("No reading list item found with id %q", id),
+	}, nil
+}
+
+func (t *ReadingTools) deleteReadingItem(ctx context.Context, req *mcp.CallToolRequest, input DeleteReadingItemInput) (*mcp.CallToolResult, DeleteReadingItemOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, DeleteReadingItemOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if !input.Confirm {
+		return nil, DeleteReadingItemOutput{
+			Success: false,
+			Message: "confirm must be set to true to delete a reading list item. This is a permanent deletion.",
+		}, nil
+	}
+
+	// Read current reading list
+	content, sha, err := t.storage.ReadFile(ctx, "reading-list.md")
+	if err != nil {
+		return nil, DeleteReadingItemOutput{}, fmt.Errorf("reading reading-list.md: %w", err)
+	}
+
+	rl, err := storage.ParseReadingList(content)
+	if err != nil {
+		return nil, DeleteReadingItemOutput{}, fmt.Errorf("parsing reading list: %w", err)
+	}
+
+	id := strings.TrimSpace(input.ID)
+
+	// Search unread list
+	for i, item := range rl.ToRead {
+		if item.ID == id {
+			deleted := item
+			rl.ToRead = append(rl.ToRead[:i], rl.ToRead[i+1:]...)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Delete reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(deleted))
+			if err != nil {
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	// Search read list
+	for i, item := range rl.Read {
+		if item.ID == id {
+			deleted := item
+			rl.Read = append(rl.Read[:i], rl.Read[i+1:]...)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Delete reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(deleted))
+			if err != nil {
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, DeleteReadingItemOutput{
+		Success: false,
+		Message: fmt.Sprintf("No reading list item found with id %q", id),
 	}, nil
 }
