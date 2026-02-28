@@ -23,7 +23,8 @@ func NewStrategyTools(s storage.Storage) *StrategyTools {
 
 // UpdateMilestoneInput is the input schema for the update_milestone tool.
 type UpdateMilestoneInput struct {
-	Text     string `json:"text" jsonschema:"Text to match against milestone descriptions. Can be partial match."`
+	Text     string `json:"text,omitempty" jsonschema:"Text to match against milestone descriptions. Can be partial match."`
+	ID       string `json:"id,omitempty" jsonschema:"ID of the milestone to update. More reliable than text matching. Use get_milestones to find IDs."`
 	Complete bool   `json:"complete" jsonschema:"Set to true to mark as complete, false to mark as incomplete"`
 }
 
@@ -101,10 +102,10 @@ func (t *StrategyTools) Register(server *mcp.Server) {
 }
 
 func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRequest, input UpdateMilestoneInput) (*mcp.CallToolResult, UpdateMilestoneOutput, error) {
-	if strings.TrimSpace(input.Text) == "" {
+	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.ID) == "" {
 		return nil, UpdateMilestoneOutput{
 			Success: false,
-			Message: "Search text cannot be empty",
+			Message: "Either text or id must be provided",
 		}, nil
 	}
 
@@ -119,37 +120,56 @@ func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRe
 		return nil, UpdateMilestoneOutput{}, fmt.Errorf("parsing strategy: %w", err)
 	}
 
-	searchText := strings.ToLower(strings.TrimSpace(input.Text))
+	// Helper to find milestone by ID or text in a slice
+	findMilestone := func(milestones []storage.Milestone, label string) (int, *UpdateMilestoneOutput) {
+		if id := strings.TrimSpace(input.ID); id != "" {
+			for i, m := range milestones {
+				if m.ID == id {
+					return i, nil
+				}
+			}
+			return -1, &UpdateMilestoneOutput{
+				Success: false,
+				Message: fmt.Sprintf("No %s milestone found with id %q", label, input.ID),
+			}
+		}
 
-	if input.Complete {
-		// Find matching active milestone to complete
+		searchText := strings.ToLower(strings.TrimSpace(input.Text))
 		var matches []int
-		for i, m := range s.ActiveMilestones {
+		for i, m := range milestones {
 			if strings.Contains(strings.ToLower(m.Text), searchText) {
 				matches = append(matches, i)
 			}
 		}
 
 		if len(matches) == 0 {
-			return nil, UpdateMilestoneOutput{
+			return -1, &UpdateMilestoneOutput{
 				Success: false,
-				Message: fmt.Sprintf("No active milestone found matching %q", input.Text),
-			}, nil
+				Message: fmt.Sprintf("No %s milestone found matching %q", label, input.Text),
+			}
 		}
 
 		if len(matches) > 1 {
 			var matchTexts []string
 			for _, idx := range matches {
-				matchTexts = append(matchTexts, fmt.Sprintf("- %s", s.ActiveMilestones[idx].Text))
+				matchTexts = append(matchTexts, fmt.Sprintf("- [%s] %s", milestones[idx].ID, milestones[idx].Text))
 			}
-			return nil, UpdateMilestoneOutput{
+			return -1, &UpdateMilestoneOutput{
 				Success: false,
-				Message: fmt.Sprintf("Multiple milestones match %q. Please be more specific:\n%s", input.Text, strings.Join(matchTexts, "\n")),
-			}, nil
+				Message: fmt.Sprintf("Multiple milestones match %q. Please be more specific or use an id:\n%s", input.Text, strings.Join(matchTexts, "\n")),
+			}
+		}
+
+		return matches[0], nil
+	}
+
+	if input.Complete {
+		idx, errOut := findMilestone(s.ActiveMilestones, "active")
+		if errOut != nil {
+			return nil, *errOut, nil
 		}
 
 		// Mark as completed
-		idx := matches[0]
 		milestone := s.ActiveMilestones[idx]
 		milestone.Completed = true
 		now := time.Now().UTC().Truncate(24 * time.Hour)
@@ -171,39 +191,22 @@ func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRe
 			return nil, UpdateMilestoneOutput{}, fmt.Errorf("writing strategy.md: %w", err)
 		}
 
+		itemJSON, err := json.Marshal(milestoneToItem(milestone))
+		if err != nil {
+			return nil, UpdateMilestoneOutput{}, fmt.Errorf("marshaling response: %w", err)
+		}
+
 		return nil, UpdateMilestoneOutput{
 			Success: true,
-			Message: fmt.Sprintf("Completed milestone: %s", milestone.Text),
+			Message: string(itemJSON),
 		}, nil
 	} else {
-		// Find matching completed milestone to uncomplete
-		var matches []int
-		for i, m := range s.CompletedMilestones {
-			if strings.Contains(strings.ToLower(m.Text), searchText) {
-				matches = append(matches, i)
-			}
-		}
-
-		if len(matches) == 0 {
-			return nil, UpdateMilestoneOutput{
-				Success: false,
-				Message: fmt.Sprintf("No completed milestone found matching %q", input.Text),
-			}, nil
-		}
-
-		if len(matches) > 1 {
-			var matchTexts []string
-			for _, idx := range matches {
-				matchTexts = append(matchTexts, fmt.Sprintf("- %s", s.CompletedMilestones[idx].Text))
-			}
-			return nil, UpdateMilestoneOutput{
-				Success: false,
-				Message: fmt.Sprintf("Multiple milestones match %q. Please be more specific:\n%s", input.Text, strings.Join(matchTexts, "\n")),
-			}, nil
+		idx, errOut := findMilestone(s.CompletedMilestones, "completed")
+		if errOut != nil {
+			return nil, *errOut, nil
 		}
 
 		// Mark as incomplete
-		idx := matches[0]
 		milestone := s.CompletedMilestones[idx]
 		milestone.Completed = false
 		milestone.CompletedAt = nil
@@ -224,9 +227,14 @@ func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRe
 			return nil, UpdateMilestoneOutput{}, fmt.Errorf("writing strategy.md: %w", err)
 		}
 
+		itemJSON, err := json.Marshal(milestoneToItem(milestone))
+		if err != nil {
+			return nil, UpdateMilestoneOutput{}, fmt.Errorf("marshaling response: %w", err)
+		}
+
 		return nil, UpdateMilestoneOutput{
 			Success: true,
-			Message: fmt.Sprintf("Reopened milestone: %s", milestone.Text),
+			Message: string(itemJSON),
 		}, nil
 	}
 }
@@ -265,9 +273,20 @@ func (t *StrategyTools) addNote(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, AddNoteOutput{}, fmt.Errorf("writing strategy.md: %w", err)
 	}
 
+	noteJSON, err := json.Marshal(struct {
+		Note  string `json:"note"`
+		Total int    `json:"total_notes"`
+	}{
+		Note:  strings.TrimSpace(input.Note),
+		Total: len(s.Notes),
+	})
+	if err != nil {
+		return nil, AddNoteOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, AddNoteOutput{
 		Success: true,
-		Message: fmt.Sprintf("Added note: %s", truncate(input.Note, 50)),
+		Message: string(noteJSON),
 	}, nil
 }
 

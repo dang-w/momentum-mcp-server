@@ -35,7 +35,8 @@ type SetReminderOutput struct {
 
 // CompleteReminderInput is the input schema for the complete_reminder tool.
 type CompleteReminderInput struct {
-	Text string `json:"text" jsonschema:"Text to match against reminder descriptions. Can be partial match."`
+	Text string `json:"text,omitempty" jsonschema:"Text to match against reminder descriptions. Can be partial match."`
+	ID   string `json:"id,omitempty" jsonschema:"ID of the reminder to complete. More reliable than text matching. Use list_reminders to find IDs."`
 }
 
 // CompleteReminderOutput is the output for the complete_reminder tool.
@@ -119,6 +120,7 @@ func (t *ReminderTools) setReminder(ctx context.Context, req *mcp.CallToolReques
 
 	// Add the new reminder
 	newReminder := storage.Reminder{
+		ID:    storage.GenerateID(),
 		Date:  date,
 		Text:  strings.TrimSpace(input.Text),
 		Added: time.Now().UTC().Truncate(24 * time.Hour),
@@ -137,17 +139,23 @@ func (t *ReminderTools) setReminder(ctx context.Context, req *mcp.CallToolReques
 		return nil, SetReminderOutput{}, fmt.Errorf("writing reminders.md: %w", err)
 	}
 
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	itemJSON, err := json.Marshal(reminderToItem(newReminder, today))
+	if err != nil {
+		return nil, SetReminderOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, SetReminderOutput{
 		Success: true,
-		Message: fmt.Sprintf("Set reminder for %s: %s", date.Format("2006-01-02"), input.Text),
+		Message: string(itemJSON),
 	}, nil
 }
 
 func (t *ReminderTools) completeReminder(ctx context.Context, req *mcp.CallToolRequest, input CompleteReminderInput) (*mcp.CallToolResult, CompleteReminderOutput, error) {
-	if strings.TrimSpace(input.Text) == "" {
+	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.ID) == "" {
 		return nil, CompleteReminderOutput{
 			Success: false,
-			Message: "Search text cannot be empty",
+			Message: "Either text or id must be provided",
 		}, nil
 	}
 
@@ -162,32 +170,47 @@ func (t *ReminderTools) completeReminder(ctx context.Context, req *mcp.CallToolR
 		return nil, CompleteReminderOutput{}, fmt.Errorf("parsing reminders: %w", err)
 	}
 
-	// Find matching reminders
-	searchText := strings.ToLower(strings.TrimSpace(input.Text))
+	// Find matching reminders — prefer ID match if provided
 	var matches []int
-	for i, r := range rf.Upcoming {
-		if strings.Contains(strings.ToLower(r.Text), searchText) {
-			matches = append(matches, i)
+	if id := strings.TrimSpace(input.ID); id != "" {
+		for i, r := range rf.Upcoming {
+			if r.ID == id {
+				matches = append(matches, i)
+				break
+			}
 		}
-	}
-
-	if len(matches) == 0 {
-		return nil, CompleteReminderOutput{
-			Success: false,
-			Message: fmt.Sprintf("No upcoming reminder found matching %q", input.Text),
-		}, nil
-	}
-
-	if len(matches) > 1 {
-		var matchTexts []string
-		for _, idx := range matches {
-			r := rf.Upcoming[idx]
-			matchTexts = append(matchTexts, fmt.Sprintf("- %s (%s)", r.Text, r.Date.Format("2006-01-02")))
+		if len(matches) == 0 {
+			return nil, CompleteReminderOutput{
+				Success: false,
+				Message: fmt.Sprintf("No upcoming reminder found with id %q", input.ID),
+			}, nil
 		}
-		return nil, CompleteReminderOutput{
-			Success: false,
-			Message: fmt.Sprintf("Multiple reminders match %q. Please be more specific:\n%s", input.Text, strings.Join(matchTexts, "\n")),
-		}, nil
+	} else {
+		searchText := strings.ToLower(strings.TrimSpace(input.Text))
+		for i, r := range rf.Upcoming {
+			if strings.Contains(strings.ToLower(r.Text), searchText) {
+				matches = append(matches, i)
+			}
+		}
+
+		if len(matches) == 0 {
+			return nil, CompleteReminderOutput{
+				Success: false,
+				Message: fmt.Sprintf("No upcoming reminder found matching %q", input.Text),
+			}, nil
+		}
+
+		if len(matches) > 1 {
+			var matchTexts []string
+			for _, idx := range matches {
+				r := rf.Upcoming[idx]
+				matchTexts = append(matchTexts, fmt.Sprintf("- [%s] %s (%s)", r.ID, r.Text, r.Date.Format("2006-01-02")))
+			}
+			return nil, CompleteReminderOutput{
+				Success: false,
+				Message: fmt.Sprintf("Multiple reminders match %q. Please be more specific or use an id:\n%s", input.Text, strings.Join(matchTexts, "\n")),
+			}, nil
+		}
 	}
 
 	// Mark as completed
@@ -213,9 +236,15 @@ func (t *ReminderTools) completeReminder(ctx context.Context, req *mcp.CallToolR
 		return nil, CompleteReminderOutput{}, fmt.Errorf("writing reminders.md: %w", err)
 	}
 
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	itemJSON, err := json.Marshal(reminderToItem(reminder, today))
+	if err != nil {
+		return nil, CompleteReminderOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, CompleteReminderOutput{
 		Success: true,
-		Message: fmt.Sprintf("Completed reminder: %s", reminder.Text),
+		Message: string(itemJSON),
 	}, nil
 }
 

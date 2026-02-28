@@ -12,7 +12,7 @@ import (
 
 const (
 	ServerName    = "momentum"
-	ServerVersion = "0.1.0"
+	ServerVersion = "0.2.0"
 )
 
 // Config holds the configuration needed to create the MCP server.

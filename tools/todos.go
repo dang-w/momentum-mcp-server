@@ -36,7 +36,8 @@ type AddTodoOutput struct {
 
 // CompleteTodoInput is the input schema for the complete_todo tool.
 type CompleteTodoInput struct {
-	Text string `json:"text" jsonschema:"Text to match against todo items. Can be partial match."`
+	Text string `json:"text,omitempty" jsonschema:"Text to match against todo items. Can be partial match."`
+	ID   string `json:"id,omitempty" jsonschema:"ID of the todo to complete. More reliable than text matching. Use list_todos to find IDs."`
 }
 
 // CompleteTodoOutput is the output for the complete_todo tool.
@@ -119,6 +120,7 @@ func (t *TodoTools) addTodo(ctx context.Context, req *mcp.CallToolRequest, input
 
 	// Add the new todo
 	newTodo := storage.Todo{
+		ID:       storage.GenerateID(),
 		Text:     strings.TrimSpace(input.Text),
 		Priority: priority,
 		Added:    time.Now().UTC().Truncate(24 * time.Hour),
@@ -137,17 +139,22 @@ func (t *TodoTools) addTodo(ctx context.Context, req *mcp.CallToolRequest, input
 		return nil, AddTodoOutput{}, fmt.Errorf("writing todos.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(todoToItem(newTodo))
+	if err != nil {
+		return nil, AddTodoOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, AddTodoOutput{
 		Success: true,
-		Message: fmt.Sprintf("Added todo: %s (priority: %s)", input.Text, priority),
+		Message: string(itemJSON),
 	}, nil
 }
 
 func (t *TodoTools) completeTodo(ctx context.Context, req *mcp.CallToolRequest, input CompleteTodoInput) (*mcp.CallToolResult, CompleteTodoOutput, error) {
-	if strings.TrimSpace(input.Text) == "" {
+	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.ID) == "" {
 		return nil, CompleteTodoOutput{
 			Success: false,
-			Message: "Search text cannot be empty",
+			Message: "Either text or id must be provided",
 		}, nil
 	}
 
@@ -162,31 +169,46 @@ func (t *TodoTools) completeTodo(ctx context.Context, req *mcp.CallToolRequest, 
 		return nil, CompleteTodoOutput{}, fmt.Errorf("parsing todos: %w", err)
 	}
 
-	// Find matching todos
-	searchText := strings.ToLower(strings.TrimSpace(input.Text))
+	// Find matching todos — prefer ID match if provided
 	var matches []int
-	for i, todo := range tf.Active {
-		if strings.Contains(strings.ToLower(todo.Text), searchText) {
-			matches = append(matches, i)
+	if id := strings.TrimSpace(input.ID); id != "" {
+		for i, todo := range tf.Active {
+			if todo.ID == id {
+				matches = append(matches, i)
+				break
+			}
 		}
-	}
-
-	if len(matches) == 0 {
-		return nil, CompleteTodoOutput{
-			Success: false,
-			Message: fmt.Sprintf("No active todo found matching %q", input.Text),
-		}, nil
-	}
-
-	if len(matches) > 1 {
-		var matchTexts []string
-		for _, idx := range matches {
-			matchTexts = append(matchTexts, fmt.Sprintf("- %s", tf.Active[idx].Text))
+		if len(matches) == 0 {
+			return nil, CompleteTodoOutput{
+				Success: false,
+				Message: fmt.Sprintf("No active todo found with id %q", input.ID),
+			}, nil
 		}
-		return nil, CompleteTodoOutput{
-			Success: false,
-			Message: fmt.Sprintf("Multiple todos match %q. Please be more specific:\n%s", input.Text, strings.Join(matchTexts, "\n")),
-		}, nil
+	} else {
+		searchText := strings.ToLower(strings.TrimSpace(input.Text))
+		for i, todo := range tf.Active {
+			if strings.Contains(strings.ToLower(todo.Text), searchText) {
+				matches = append(matches, i)
+			}
+		}
+
+		if len(matches) == 0 {
+			return nil, CompleteTodoOutput{
+				Success: false,
+				Message: fmt.Sprintf("No active todo found matching %q", input.Text),
+			}, nil
+		}
+
+		if len(matches) > 1 {
+			var matchTexts []string
+			for _, idx := range matches {
+				matchTexts = append(matchTexts, fmt.Sprintf("- [%s] %s", tf.Active[idx].ID, tf.Active[idx].Text))
+			}
+			return nil, CompleteTodoOutput{
+				Success: false,
+				Message: fmt.Sprintf("Multiple todos match %q. Please be more specific or use an id:\n%s", input.Text, strings.Join(matchTexts, "\n")),
+			}, nil
+		}
 	}
 
 	// Mark as completed
@@ -212,9 +234,14 @@ func (t *TodoTools) completeTodo(ctx context.Context, req *mcp.CallToolRequest, 
 		return nil, CompleteTodoOutput{}, fmt.Errorf("writing todos.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(todoToItem(todo))
+	if err != nil {
+		return nil, CompleteTodoOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, CompleteTodoOutput{
 		Success: true,
-		Message: fmt.Sprintf("Completed: %s", todo.Text),
+		Message: string(itemJSON),
 	}, nil
 }
 

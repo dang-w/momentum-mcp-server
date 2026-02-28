@@ -11,6 +11,7 @@ import (
 
 // TodoItem is a JSON-serializable todo for API responses.
 type TodoItem struct {
+	ID          string  `json:"id"`
 	Text        string  `json:"text"`
 	Priority    string  `json:"priority"`
 	Completed   bool    `json:"completed"`
@@ -20,6 +21,7 @@ type TodoItem struct {
 
 // ReminderItem is a JSON-serializable reminder for API responses.
 type ReminderItem struct {
+	ID          string  `json:"id"`
 	Date        string  `json:"date"`
 	Text        string  `json:"text"`
 	Completed   bool    `json:"completed"`
@@ -30,6 +32,7 @@ type ReminderItem struct {
 
 // ReadingListItem is a JSON-serializable reading list entry for API responses.
 type ReadingListItem struct {
+	ID     string  `json:"id"`
 	URL    string  `json:"url"`
 	Notes  string  `json:"notes,omitempty"`
 	Read   bool    `json:"read"`
@@ -39,6 +42,7 @@ type ReadingListItem struct {
 
 // MilestoneItem is a JSON-serializable milestone for API responses.
 type MilestoneItem struct {
+	ID          string  `json:"id"`
 	Text        string  `json:"text"`
 	Due         *string `json:"due,omitempty"`
 	Completed   bool    `json:"completed"`
@@ -65,6 +69,7 @@ func formatDatePtr(t *time.Time) *string {
 
 func todoToItem(t storage.Todo) TodoItem {
 	return TodoItem{
+		ID:          t.ID,
 		Text:        t.Text,
 		Priority:    string(t.Priority),
 		Completed:   t.Completed,
@@ -75,6 +80,7 @@ func todoToItem(t storage.Todo) TodoItem {
 
 func reminderToItem(r storage.Reminder, today time.Time) ReminderItem {
 	return ReminderItem{
+		ID:          r.ID,
 		Date:        formatDate(r.Date),
 		Text:        r.Text,
 		Completed:   r.Completed,
@@ -86,6 +92,7 @@ func reminderToItem(r storage.Reminder, today time.Time) ReminderItem {
 
 func readingToItem(r storage.ReadingItem) ReadingListItem {
 	return ReadingListItem{
+		ID:     r.ID,
 		URL:    r.URL,
 		Notes:  r.Notes,
 		Read:   r.Read,
@@ -96,6 +103,7 @@ func readingToItem(r storage.ReadingItem) ReadingListItem {
 
 func milestoneToItem(m storage.Milestone) MilestoneItem {
 	return MilestoneItem{
+		ID:          m.ID,
 		Text:        m.Text,
 		Due:         formatDatePtr(m.Due),
 		Completed:   m.Completed,

@@ -35,7 +35,8 @@ type AddToReadingListOutput struct {
 
 // MarkReadInput is the input schema for the mark_read tool.
 type MarkReadInput struct {
-	URL   string `json:"url" jsonschema:"URL or partial URL to match against reading list items"`
+	URL   string `json:"url,omitempty" jsonschema:"URL or partial URL to match against reading list items"`
+	ID    string `json:"id,omitempty" jsonschema:"ID of the reading list item to mark as read. More reliable than URL matching. Use list_reading_list to find IDs."`
 	Notes string `json:"notes,omitempty" jsonschema:"Optional notes about the article (will replace existing notes)"`
 }
 
@@ -121,6 +122,7 @@ func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRe
 
 	// Add the new item
 	newItem := storage.ReadingItem{
+		ID:    storage.GenerateID(),
 		URL:   url,
 		Notes: strings.TrimSpace(input.Notes),
 		Added: time.Now().UTC().Truncate(24 * time.Hour),
@@ -139,17 +141,22 @@ func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRe
 		return nil, AddToReadingListOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(readingToItem(newItem))
+	if err != nil {
+		return nil, AddToReadingListOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, AddToReadingListOutput{
 		Success: true,
-		Message: fmt.Sprintf("Added to reading list: %s", url),
+		Message: string(itemJSON),
 	}, nil
 }
 
 func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, input MarkReadInput) (*mcp.CallToolResult, MarkReadOutput, error) {
-	if strings.TrimSpace(input.URL) == "" {
+	if strings.TrimSpace(input.URL) == "" && strings.TrimSpace(input.ID) == "" {
 		return nil, MarkReadOutput{
 			Success: false,
-			Message: "URL cannot be empty",
+			Message: "Either url or id must be provided",
 		}, nil
 	}
 
@@ -164,31 +171,46 @@ func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, MarkReadOutput{}, fmt.Errorf("parsing reading list: %w", err)
 	}
 
-	// Find matching items
-	searchText := strings.ToLower(strings.TrimSpace(input.URL))
+	// Find matching items — prefer ID match if provided
 	var matches []int
-	for i, item := range rl.ToRead {
-		if strings.Contains(strings.ToLower(item.URL), searchText) {
-			matches = append(matches, i)
+	if id := strings.TrimSpace(input.ID); id != "" {
+		for i, item := range rl.ToRead {
+			if item.ID == id {
+				matches = append(matches, i)
+				break
+			}
 		}
-	}
-
-	if len(matches) == 0 {
-		return nil, MarkReadOutput{
-			Success: false,
-			Message: fmt.Sprintf("No unread item found matching %q", input.URL),
-		}, nil
-	}
-
-	if len(matches) > 1 {
-		var matchURLs []string
-		for _, idx := range matches {
-			matchURLs = append(matchURLs, fmt.Sprintf("- %s", rl.ToRead[idx].URL))
+		if len(matches) == 0 {
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("No unread item found with id %q", input.ID),
+			}, nil
 		}
-		return nil, MarkReadOutput{
-			Success: false,
-			Message: fmt.Sprintf("Multiple items match %q. Please be more specific:\n%s", input.URL, strings.Join(matchURLs, "\n")),
-		}, nil
+	} else {
+		searchText := strings.ToLower(strings.TrimSpace(input.URL))
+		for i, item := range rl.ToRead {
+			if strings.Contains(strings.ToLower(item.URL), searchText) {
+				matches = append(matches, i)
+			}
+		}
+
+		if len(matches) == 0 {
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("No unread item found matching %q", input.URL),
+			}, nil
+		}
+
+		if len(matches) > 1 {
+			var matchURLs []string
+			for _, idx := range matches {
+				matchURLs = append(matchURLs, fmt.Sprintf("- [%s] %s", rl.ToRead[idx].ID, rl.ToRead[idx].URL))
+			}
+			return nil, MarkReadOutput{
+				Success: false,
+				Message: fmt.Sprintf("Multiple items match %q. Please be more specific or use an id:\n%s", input.URL, strings.Join(matchURLs, "\n")),
+			}, nil
+		}
 	}
 
 	// Mark as read
@@ -217,9 +239,14 @@ func (t *ReadingTools) markRead(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, MarkReadOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
 	}
 
+	itemJSON, err := json.Marshal(readingToItem(item))
+	if err != nil {
+		return nil, MarkReadOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
 	return nil, MarkReadOutput{
 		Success: true,
-		Message: fmt.Sprintf("Marked as read: %s", item.URL),
+		Message: string(itemJSON),
 	}, nil
 }
 
