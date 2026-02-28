@@ -64,6 +64,18 @@ type ListReadingListResult struct {
 	TotalRead   int               `json:"total_read"`
 }
 
+// EditReadingItemInput is the input schema for the edit_reading_item tool.
+type EditReadingItemInput struct {
+	ID    string `json:"id" jsonschema:"ID of the reading list item to edit. Use list_reading_list to find IDs."`
+	Notes string `json:"notes,omitempty" jsonschema:"New notes. Pass empty string to clear notes."`
+}
+
+// EditReadingItemOutput is the output for the edit_reading_item tool.
+type EditReadingItemOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // Register registers reading list tools with the MCP server.
 func (t *ReadingTools) Register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -80,6 +92,11 @@ func (t *ReadingTools) Register(server *mcp.Server) {
 		Name:        "list_reading_list",
 		Description: "List reading list items with optional filtering by read status",
 	}, t.listReadingList)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_reading_item",
+		Description: "Edit notes on a reading list item",
+	}, t.editReadingItem)
 }
 
 func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRequest, input AddToReadingListInput) (*mcp.CallToolResult, AddToReadingListOutput, error) {
@@ -301,5 +318,87 @@ func (t *ReadingTools) listReadingList(ctx context.Context, req *mcp.CallToolReq
 	return nil, ListReadingListOutput{
 		Success: true,
 		Message: string(jsonBytes),
+	}, nil
+}
+
+func (t *ReadingTools) editReadingItem(ctx context.Context, req *mcp.CallToolRequest, input EditReadingItemInput) (*mcp.CallToolResult, EditReadingItemOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, EditReadingItemOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	// Read current reading list
+	content, sha, err := t.storage.ReadFile(ctx, "reading-list.md")
+	if err != nil {
+		return nil, EditReadingItemOutput{}, fmt.Errorf("reading reading-list.md: %w", err)
+	}
+
+	rl, err := storage.ParseReadingList(content)
+	if err != nil {
+		return nil, EditReadingItemOutput{}, fmt.Errorf("parsing reading list: %w", err)
+	}
+
+	// Search both lists by ID
+	id := strings.TrimSpace(input.ID)
+
+	for i, item := range rl.ToRead {
+		if item.ID == id {
+			rl.ToRead[i].Notes = strings.TrimSpace(input.Notes)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Edit reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(rl.ToRead[i]))
+			if err != nil {
+				return nil, EditReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	for i, item := range rl.Read {
+		if item.ID == id {
+			rl.Read[i].Notes = strings.TrimSpace(input.Notes)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Edit reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(rl.Read[i]))
+			if err != nil {
+				return nil, EditReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, EditReadingItemOutput{
+		Success: false,
+		Message: fmt.Sprintf("No reading list item found with id %q", id),
 	}, nil
 }

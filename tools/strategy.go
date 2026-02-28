@@ -62,6 +62,30 @@ type ListNotesResult struct {
 	Total int      `json:"total"`
 }
 
+// EditMilestoneInput is the input schema for the edit_milestone tool.
+type EditMilestoneInput struct {
+	ID       string `json:"id" jsonschema:"ID of the milestone to edit. Use get_milestones to find IDs."`
+	Text     string `json:"text,omitempty" jsonschema:"New milestone text. If omitted, keeps existing text."`
+	Due      string `json:"due,omitempty" jsonschema:"New due date in YYYY-MM-DD format. If omitted, keeps existing due date. Pass 'none' to clear the due date."`
+}
+
+// EditMilestoneOutput is the output for the edit_milestone tool.
+type EditMilestoneOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// DeleteNoteInput is the input schema for the delete_note tool.
+type DeleteNoteInput struct {
+	Text string `json:"text" jsonschema:"Text to match against note content. Must match exactly one note (case-insensitive partial match)."`
+}
+
+// DeleteNoteOutput is the output for the delete_note tool.
+type DeleteNoteOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // GetMilestonesInput is the input schema for the get_milestones tool.
 type GetMilestonesInput struct{}
 
@@ -99,6 +123,16 @@ func (t *StrategyTools) Register(server *mcp.Server) {
 		Name:        "get_milestones",
 		Description: "Get all strategy milestones with their completion status",
 	}, t.getMilestones)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_milestone",
+		Description: "Edit a milestone's text or due date",
+	}, t.editMilestone)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_note",
+		Description: "Delete a strategy note by text match",
+	}, t.deleteNote)
 }
 
 func (t *StrategyTools) updateMilestone(ctx context.Context, req *mcp.CallToolRequest, input UpdateMilestoneInput) (*mcp.CallToolResult, UpdateMilestoneOutput, error) {
@@ -364,5 +398,203 @@ func (t *StrategyTools) getMilestones(ctx context.Context, req *mcp.CallToolRequ
 	return nil, GetMilestonesOutput{
 		Success: true,
 		Message: string(jsonBytes),
+	}, nil
+}
+
+func (t *StrategyTools) editMilestone(ctx context.Context, req *mcp.CallToolRequest, input EditMilestoneInput) (*mcp.CallToolResult, EditMilestoneOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, EditMilestoneOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.Due) == "" {
+		return nil, EditMilestoneOutput{
+			Success: false,
+			Message: "At least one of text or due must be provided",
+		}, nil
+	}
+
+	// Validate due date if provided (and not "none")
+	var newDue *time.Time
+	clearDue := false
+	if d := strings.TrimSpace(input.Due); d != "" {
+		if strings.ToLower(d) == "none" {
+			clearDue = true
+		} else {
+			t, err := time.Parse("2006-01-02", d)
+			if err != nil {
+				return nil, EditMilestoneOutput{
+					Success: false,
+					Message: fmt.Sprintf("Invalid date format %q. Use YYYY-MM-DD format or 'none' to clear.", input.Due),
+				}, nil
+			}
+			newDue = &t
+		}
+	}
+
+	// Read current strategy
+	content, sha, err := t.storage.ReadFile(ctx, "strategy.md")
+	if err != nil {
+		return nil, EditMilestoneOutput{}, fmt.Errorf("reading strategy.md: %w", err)
+	}
+
+	s, err := storage.ParseStrategy(content)
+	if err != nil {
+		return nil, EditMilestoneOutput{}, fmt.Errorf("parsing strategy: %w", err)
+	}
+
+	// Search both active and completed milestones by ID
+	id := strings.TrimSpace(input.ID)
+
+	applyEdit := func(m *storage.Milestone) {
+		if text := strings.TrimSpace(input.Text); text != "" {
+			m.Text = text
+		}
+		if clearDue {
+			m.Due = nil
+		} else if newDue != nil {
+			m.Due = newDue
+		}
+	}
+
+	for i, m := range s.ActiveMilestones {
+		if m.ID == id {
+			applyEdit(&s.ActiveMilestones[i])
+
+			newContent := storage.SerializeStrategy(s)
+			if err := t.storage.WriteFile(ctx, "strategy.md", newContent, sha, fmt.Sprintf("Edit milestone: %s", truncate(s.ActiveMilestones[i].Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditMilestoneOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditMilestoneOutput{}, fmt.Errorf("writing strategy.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(milestoneToItem(s.ActiveMilestones[i]))
+			if err != nil {
+				return nil, EditMilestoneOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditMilestoneOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	for i, m := range s.CompletedMilestones {
+		if m.ID == id {
+			applyEdit(&s.CompletedMilestones[i])
+
+			newContent := storage.SerializeStrategy(s)
+			if err := t.storage.WriteFile(ctx, "strategy.md", newContent, sha, fmt.Sprintf("Edit milestone: %s", truncate(s.CompletedMilestones[i].Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditMilestoneOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditMilestoneOutput{}, fmt.Errorf("writing strategy.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(milestoneToItem(s.CompletedMilestones[i]))
+			if err != nil {
+				return nil, EditMilestoneOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditMilestoneOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, EditMilestoneOutput{
+		Success: false,
+		Message: fmt.Sprintf("No milestone found with id %q", id),
+	}, nil
+}
+
+func (t *StrategyTools) deleteNote(ctx context.Context, req *mcp.CallToolRequest, input DeleteNoteInput) (*mcp.CallToolResult, DeleteNoteOutput, error) {
+	if strings.TrimSpace(input.Text) == "" {
+		return nil, DeleteNoteOutput{
+			Success: false,
+			Message: "text is required",
+		}, nil
+	}
+
+	// Read current strategy
+	content, sha, err := t.storage.ReadFile(ctx, "strategy.md")
+	if err != nil {
+		return nil, DeleteNoteOutput{}, fmt.Errorf("reading strategy.md: %w", err)
+	}
+
+	s, err := storage.ParseStrategy(content)
+	if err != nil {
+		return nil, DeleteNoteOutput{}, fmt.Errorf("parsing strategy: %w", err)
+	}
+
+	// Find matching notes
+	searchText := strings.ToLower(strings.TrimSpace(input.Text))
+	var matches []int
+	for i, note := range s.Notes {
+		if strings.Contains(strings.ToLower(note), searchText) {
+			matches = append(matches, i)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, DeleteNoteOutput{
+			Success: false,
+			Message: fmt.Sprintf("No note found matching %q", input.Text),
+		}, nil
+	}
+
+	if len(matches) > 1 {
+		var matchTexts []string
+		for _, idx := range matches {
+			matchTexts = append(matchTexts, fmt.Sprintf("- %s", truncate(s.Notes[idx], 80)))
+		}
+		return nil, DeleteNoteOutput{
+			Success: false,
+			Message: fmt.Sprintf("Multiple notes match %q. Please be more specific:\n%s", input.Text, strings.Join(matchTexts, "\n")),
+		}, nil
+	}
+
+	// Delete the note
+	idx := matches[0]
+	deleted := s.Notes[idx]
+	s.Notes = append(s.Notes[:idx], s.Notes[idx+1:]...)
+
+	// Serialize and write back
+	newContent := storage.SerializeStrategy(s)
+	if err := t.storage.WriteFile(ctx, "strategy.md", newContent, sha, fmt.Sprintf("Delete note: %s", truncate(deleted, 50))); err != nil {
+		if err == storage.ErrConflict {
+			return nil, DeleteNoteOutput{
+				Success: false,
+				Message: "File was modified by another process. Please try again.",
+			}, nil
+		}
+		return nil, DeleteNoteOutput{}, fmt.Errorf("writing strategy.md: %w", err)
+	}
+
+	noteJSON, err := json.Marshal(struct {
+		Deleted string `json:"deleted_note"`
+		Total   int    `json:"total_notes"`
+	}{
+		Deleted: deleted,
+		Total:   len(s.Notes),
+	})
+	if err != nil {
+		return nil, DeleteNoteOutput{}, fmt.Errorf("marshaling response: %w", err)
+	}
+
+	return nil, DeleteNoteOutput{
+		Success: true,
+		Message: string(noteJSON),
 	}, nil
 }

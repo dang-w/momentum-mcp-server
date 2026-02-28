@@ -66,6 +66,19 @@ type ListRemindersResult struct {
 	TotalOverdue   int            `json:"total_overdue"`
 }
 
+// EditReminderInput is the input schema for the edit_reminder tool.
+type EditReminderInput struct {
+	ID   string `json:"id" jsonschema:"ID of the reminder to edit. Use list_reminders to find IDs."`
+	Text string `json:"text,omitempty" jsonschema:"New reminder text. If omitted, keeps existing text."`
+	Date string `json:"date,omitempty" jsonschema:"New date in YYYY-MM-DD format. If omitted, keeps existing date."`
+}
+
+// EditReminderOutput is the output for the edit_reminder tool.
+type EditReminderOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // Register registers reminder tools with the MCP server.
 func (t *ReminderTools) Register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -82,6 +95,11 @@ func (t *ReminderTools) Register(server *mcp.Server) {
 		Name:        "list_reminders",
 		Description: "List reminders with optional filtering by status and date range",
 	}, t.listReminders)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_reminder",
+		Description: "Edit a reminder's text or date",
+	}, t.editReminder)
 }
 
 func (t *ReminderTools) setReminder(ctx context.Context, req *mcp.CallToolRequest, input SetReminderInput) (*mcp.CallToolResult, SetReminderOutput, error) {
@@ -351,5 +369,86 @@ func (t *ReminderTools) listReminders(ctx context.Context, req *mcp.CallToolRequ
 	return nil, ListRemindersOutput{
 		Success: true,
 		Message: string(jsonBytes),
+	}, nil
+}
+
+func (t *ReminderTools) editReminder(ctx context.Context, req *mcp.CallToolRequest, input EditReminderInput) (*mcp.CallToolResult, EditReminderOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, EditReminderOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.Date) == "" {
+		return nil, EditReminderOutput{
+			Success: false,
+			Message: "At least one of text or date must be provided",
+		}, nil
+	}
+
+	// Validate date if provided
+	var newDate time.Time
+	if d := strings.TrimSpace(input.Date); d != "" {
+		var err error
+		newDate, err = time.Parse("2006-01-02", d)
+		if err != nil {
+			return nil, EditReminderOutput{
+				Success: false,
+				Message: fmt.Sprintf("Invalid date format %q. Use YYYY-MM-DD format.", input.Date),
+			}, nil
+		}
+	}
+
+	// Read current reminders
+	content, sha, err := t.storage.ReadFile(ctx, "reminders.md")
+	if err != nil {
+		return nil, EditReminderOutput{}, fmt.Errorf("reading reminders.md: %w", err)
+	}
+
+	rf, err := storage.ParseReminders(content)
+	if err != nil {
+		return nil, EditReminderOutput{}, fmt.Errorf("parsing reminders: %w", err)
+	}
+
+	// Find the reminder by ID in upcoming list
+	id := strings.TrimSpace(input.ID)
+	for i, r := range rf.Upcoming {
+		if r.ID == id {
+			if text := strings.TrimSpace(input.Text); text != "" {
+				rf.Upcoming[i].Text = text
+			}
+			if !newDate.IsZero() {
+				rf.Upcoming[i].Date = newDate
+			}
+
+			// Serialize and write back
+			newContent := storage.SerializeReminders(rf)
+			if err := t.storage.WriteFile(ctx, "reminders.md", newContent, sha, fmt.Sprintf("Edit reminder: %s", truncate(rf.Upcoming[i].Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, EditReminderOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, EditReminderOutput{}, fmt.Errorf("writing reminders.md: %w", err)
+			}
+
+			today := time.Now().UTC().Truncate(24 * time.Hour)
+			itemJSON, err := json.Marshal(reminderToItem(rf.Upcoming[i], today))
+			if err != nil {
+				return nil, EditReminderOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, EditReminderOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, EditReminderOutput{
+		Success: false,
+		Message: fmt.Sprintf("No upcoming reminder found with id %q", id),
 	}, nil
 }
