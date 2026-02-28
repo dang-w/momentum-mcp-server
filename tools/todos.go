@@ -65,6 +65,18 @@ type ListTodosResult struct {
 	TotalCompleted int        `json:"total_completed"`
 }
 
+// DeleteTodoInput is the input schema for the delete_todo tool.
+type DeleteTodoInput struct {
+	ID      string `json:"id" jsonschema:"ID of the todo to delete. Use list_todos to find IDs."`
+	Confirm bool   `json:"confirm" jsonschema:"Must be set to true to confirm deletion. This is a hard delete, not completion."`
+}
+
+// DeleteTodoOutput is the output for the delete_todo tool.
+type DeleteTodoOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // EditTodoInput is the input schema for the edit_todo tool.
 type EditTodoInput struct {
 	ID       string `json:"id" jsonschema:"ID of the todo to edit. Use list_todos to find IDs."`
@@ -99,6 +111,11 @@ func (t *TodoTools) Register(server *mcp.Server) {
 		Name:        "edit_todo",
 		Description: "Edit a todo item's text or priority",
 	}, t.editTodo)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_todo",
+		Description: "Permanently delete a todo item. Use complete_todo for normal completion.",
+	}, t.deleteTodo)
 }
 
 func (t *TodoTools) addTodo(ctx context.Context, req *mcp.CallToolRequest, input AddTodoInput) (*mcp.CallToolResult, AddTodoOutput, error) {
@@ -435,6 +452,98 @@ func (t *TodoTools) editTodo(ctx context.Context, req *mcp.CallToolRequest, inpu
 	}
 
 	return nil, EditTodoOutput{}, nil // unreachable
+}
+
+func (t *TodoTools) deleteTodo(ctx context.Context, req *mcp.CallToolRequest, input DeleteTodoInput) (*mcp.CallToolResult, DeleteTodoOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, DeleteTodoOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if !input.Confirm {
+		return nil, DeleteTodoOutput{
+			Success: false,
+			Message: "confirm must be set to true to delete a todo. This is a permanent deletion.",
+		}, nil
+	}
+
+	// Read current todos
+	content, sha, err := t.storage.ReadFile(ctx, "todos.md")
+	if err != nil {
+		return nil, DeleteTodoOutput{}, fmt.Errorf("reading todos.md: %w", err)
+	}
+
+	tf, err := storage.ParseTodos(content)
+	if err != nil {
+		return nil, DeleteTodoOutput{}, fmt.Errorf("parsing todos: %w", err)
+	}
+
+	id := strings.TrimSpace(input.ID)
+
+	// Search active list
+	for i, todo := range tf.Active {
+		if todo.ID == id {
+			deleted := todo
+			tf.Active = append(tf.Active[:i], tf.Active[i+1:]...)
+
+			newContent := storage.SerializeTodos(tf)
+			if err := t.storage.WriteFile(ctx, "todos.md", newContent, sha, fmt.Sprintf("Delete todo: %s", truncate(deleted.Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteTodoOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteTodoOutput{}, fmt.Errorf("writing todos.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(todoToItem(deleted))
+			if err != nil {
+				return nil, DeleteTodoOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteTodoOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	// Search completed list
+	for i, todo := range tf.Completed {
+		if todo.ID == id {
+			deleted := todo
+			tf.Completed = append(tf.Completed[:i], tf.Completed[i+1:]...)
+
+			newContent := storage.SerializeTodos(tf)
+			if err := t.storage.WriteFile(ctx, "todos.md", newContent, sha, fmt.Sprintf("Delete todo: %s", truncate(deleted.Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteTodoOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteTodoOutput{}, fmt.Errorf("writing todos.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(todoToItem(deleted))
+			if err != nil {
+				return nil, DeleteTodoOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteTodoOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, DeleteTodoOutput{
+		Success: false,
+		Message: fmt.Sprintf("No todo found with id %q", id),
+	}, nil
 }
 
 // truncate shortens a string to maxLen, adding "..." if truncated.

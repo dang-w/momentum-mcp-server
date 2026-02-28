@@ -64,6 +64,18 @@ type ListReadingListResult struct {
 	TotalRead   int               `json:"total_read"`
 }
 
+// DeleteReadingItemInput is the input schema for the delete_reading_item tool.
+type DeleteReadingItemInput struct {
+	ID      string `json:"id" jsonschema:"ID of the reading list item to delete. Use list_reading_list to find IDs."`
+	Confirm bool   `json:"confirm" jsonschema:"Must be set to true to confirm deletion."`
+}
+
+// DeleteReadingItemOutput is the output for the delete_reading_item tool.
+type DeleteReadingItemOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // EditReadingItemInput is the input schema for the edit_reading_item tool.
 type EditReadingItemInput struct {
 	ID    string `json:"id" jsonschema:"ID of the reading list item to edit. Use list_reading_list to find IDs."`
@@ -97,6 +109,11 @@ func (t *ReadingTools) Register(server *mcp.Server) {
 		Name:        "edit_reading_item",
 		Description: "Edit notes on a reading list item",
 	}, t.editReadingItem)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_reading_item",
+		Description: "Permanently delete a reading list item",
+	}, t.deleteReadingItem)
 }
 
 func (t *ReadingTools) addToReadingList(ctx context.Context, req *mcp.CallToolRequest, input AddToReadingListInput) (*mcp.CallToolResult, AddToReadingListOutput, error) {
@@ -398,6 +415,98 @@ func (t *ReadingTools) editReadingItem(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	return nil, EditReadingItemOutput{
+		Success: false,
+		Message: fmt.Sprintf("No reading list item found with id %q", id),
+	}, nil
+}
+
+func (t *ReadingTools) deleteReadingItem(ctx context.Context, req *mcp.CallToolRequest, input DeleteReadingItemInput) (*mcp.CallToolResult, DeleteReadingItemOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, DeleteReadingItemOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if !input.Confirm {
+		return nil, DeleteReadingItemOutput{
+			Success: false,
+			Message: "confirm must be set to true to delete a reading list item. This is a permanent deletion.",
+		}, nil
+	}
+
+	// Read current reading list
+	content, sha, err := t.storage.ReadFile(ctx, "reading-list.md")
+	if err != nil {
+		return nil, DeleteReadingItemOutput{}, fmt.Errorf("reading reading-list.md: %w", err)
+	}
+
+	rl, err := storage.ParseReadingList(content)
+	if err != nil {
+		return nil, DeleteReadingItemOutput{}, fmt.Errorf("parsing reading list: %w", err)
+	}
+
+	id := strings.TrimSpace(input.ID)
+
+	// Search unread list
+	for i, item := range rl.ToRead {
+		if item.ID == id {
+			deleted := item
+			rl.ToRead = append(rl.ToRead[:i], rl.ToRead[i+1:]...)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Delete reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(deleted))
+			if err != nil {
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	// Search read list
+	for i, item := range rl.Read {
+		if item.ID == id {
+			deleted := item
+			rl.Read = append(rl.Read[:i], rl.Read[i+1:]...)
+
+			newContent := storage.SerializeReadingList(rl)
+			if err := t.storage.WriteFile(ctx, "reading-list.md", newContent, sha, "Delete reading list item"); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReadingItemOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("writing reading-list.md: %w", err)
+			}
+
+			itemJSON, err := json.Marshal(readingToItem(deleted))
+			if err != nil {
+				return nil, DeleteReadingItemOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReadingItemOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, DeleteReadingItemOutput{
 		Success: false,
 		Message: fmt.Sprintf("No reading list item found with id %q", id),
 	}, nil

@@ -66,6 +66,18 @@ type ListRemindersResult struct {
 	TotalOverdue   int            `json:"total_overdue"`
 }
 
+// DeleteReminderInput is the input schema for the delete_reminder tool.
+type DeleteReminderInput struct {
+	ID      string `json:"id" jsonschema:"ID of the reminder to delete. Use list_reminders to find IDs."`
+	Confirm bool   `json:"confirm" jsonschema:"Must be set to true to confirm deletion. This is a permanent deletion."`
+}
+
+// DeleteReminderOutput is the output for the delete_reminder tool.
+type DeleteReminderOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // EditReminderInput is the input schema for the edit_reminder tool.
 type EditReminderInput struct {
 	ID   string `json:"id" jsonschema:"ID of the reminder to edit. Use list_reminders to find IDs."`
@@ -100,6 +112,11 @@ func (t *ReminderTools) Register(server *mcp.Server) {
 		Name:        "edit_reminder",
 		Description: "Edit a reminder's text or date",
 	}, t.editReminder)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "delete_reminder",
+		Description: "Permanently delete a reminder",
+	}, t.deleteReminder)
 }
 
 func (t *ReminderTools) setReminder(ctx context.Context, req *mcp.CallToolRequest, input SetReminderInput) (*mcp.CallToolResult, SetReminderOutput, error) {
@@ -450,5 +467,99 @@ func (t *ReminderTools) editReminder(ctx context.Context, req *mcp.CallToolReque
 	return nil, EditReminderOutput{
 		Success: false,
 		Message: fmt.Sprintf("No upcoming reminder found with id %q", id),
+	}, nil
+}
+
+func (t *ReminderTools) deleteReminder(ctx context.Context, req *mcp.CallToolRequest, input DeleteReminderInput) (*mcp.CallToolResult, DeleteReminderOutput, error) {
+	if strings.TrimSpace(input.ID) == "" {
+		return nil, DeleteReminderOutput{
+			Success: false,
+			Message: "id is required",
+		}, nil
+	}
+
+	if !input.Confirm {
+		return nil, DeleteReminderOutput{
+			Success: false,
+			Message: "confirm must be set to true to delete a reminder. This is a permanent deletion.",
+		}, nil
+	}
+
+	// Read current reminders
+	content, sha, err := t.storage.ReadFile(ctx, "reminders.md")
+	if err != nil {
+		return nil, DeleteReminderOutput{}, fmt.Errorf("reading reminders.md: %w", err)
+	}
+
+	rf, err := storage.ParseReminders(content)
+	if err != nil {
+		return nil, DeleteReminderOutput{}, fmt.Errorf("parsing reminders: %w", err)
+	}
+
+	id := strings.TrimSpace(input.ID)
+
+	// Search upcoming list
+	for i, r := range rf.Upcoming {
+		if r.ID == id {
+			deleted := r
+			rf.Upcoming = append(rf.Upcoming[:i], rf.Upcoming[i+1:]...)
+
+			newContent := storage.SerializeReminders(rf)
+			if err := t.storage.WriteFile(ctx, "reminders.md", newContent, sha, fmt.Sprintf("Delete reminder: %s", truncate(deleted.Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReminderOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReminderOutput{}, fmt.Errorf("writing reminders.md: %w", err)
+			}
+
+			today := time.Now().UTC().Truncate(24 * time.Hour)
+			itemJSON, err := json.Marshal(reminderToItem(deleted, today))
+			if err != nil {
+				return nil, DeleteReminderOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReminderOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	// Search completed list
+	for i, r := range rf.Completed {
+		if r.ID == id {
+			deleted := r
+			rf.Completed = append(rf.Completed[:i], rf.Completed[i+1:]...)
+
+			newContent := storage.SerializeReminders(rf)
+			if err := t.storage.WriteFile(ctx, "reminders.md", newContent, sha, fmt.Sprintf("Delete reminder: %s", truncate(deleted.Text, 50))); err != nil {
+				if err == storage.ErrConflict {
+					return nil, DeleteReminderOutput{
+						Success: false,
+						Message: "File was modified by another process. Please try again.",
+					}, nil
+				}
+				return nil, DeleteReminderOutput{}, fmt.Errorf("writing reminders.md: %w", err)
+			}
+
+			today := time.Now().UTC().Truncate(24 * time.Hour)
+			itemJSON, err := json.Marshal(reminderToItem(deleted, today))
+			if err != nil {
+				return nil, DeleteReminderOutput{}, fmt.Errorf("marshaling response: %w", err)
+			}
+
+			return nil, DeleteReminderOutput{
+				Success: true,
+				Message: string(itemJSON),
+			}, nil
+		}
+	}
+
+	return nil, DeleteReminderOutput{
+		Success: false,
+		Message: fmt.Sprintf("No reminder found with id %q", id),
 	}, nil
 }
